@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hex Tool</title>
+
+<style>
+html,body{
+margin:0;
+overflow:hidden;
+background:#222;
+}
+
+canvas{
+display:block;
+width:100%;
+height:100%;
+cursor:crosshair;
+}
+
+#ui{
+position:absolute;
+top:10px;
+left:10px;
+z-index:10;
+display:flex;
+gap:10px;
+flex-wrap:wrap;
+}
+
+button{
+padding:10px;
+border:none;
+border-radius:10px;
+background:white;
+font-weight:bold;
+cursor:pointer;
+}
+
+input{
+display:none;
+}
+</style>
+</head>
+<body>
+
+<div id="ui">
+<button id="clearBtn">Clear drawing</button>
+<button id="loadBtn">Load drawing</button>
+<button id="saveBtn">Save drawing</button>
+<button id="resetBtn">Reset rotations</button>
+<button id="loadRotBtn">Load rotations</button>
+<button id="saveRotBtn">Save rotations</button>
+<button id="savePavementBtn">Save pavement</button>
+<button id="borderBtn">Border ON</button>
+<button id="masterBtn">Master OFF</button>
+
+<input type="file" id="fileInput" accept="image/*">
+<input type="file" id="rotInput" accept="application/json">
+</div>
+
+<canvas id="c"></canvas>
+
+<script>
+let loadedRotations = null;
+let loadStepIndex = 0;
+const GRID_W = 10;
+const GRID_H = 10;
+
+const c=document.getElementById("c");
+const ctx=c.getContext("2d");
+
+let W,H;
+const S=45;
+
+const hexes=[];
+let masterIndex=2;
+
+let strokes=[];
+let cur=null;
+let drawing=false;
+
+let showBorder=true;
+let texture=null;
+let highlightedMaster=false;
+
+/* ---------- HEX ---------- */
+function hexPts(x,y,s,r=0){
+
+const p=[];
+
+for(let i=0;i<6;i++){
+
+const a=r+i*Math.PI/3;
+
+p.push({
+x:x+Math.cos(a)*s,
+y:y+Math.sin(a)*s
+});
+
+}
+
+return p;
+}
+
+/* ---------- GRID ---------- */
+function build(){
+
+hexes.length = [];
+
+const h = Math.sqrt(3) * S;
+const dx = 1.5 * S;
+const dy = h;
+
+let idx = 0;
+
+const offsetX = W / 2 - (GRID_W * dx) / 2;
+const offsetY = H / 2 - (GRID_H * dy) / 2;
+
+for(let cx = 0; cx < GRID_W; cx++){
+for(let cy = 0; cy < GRID_H; cy++){
+
+const x = offsetX + cx * dx;
+const y = offsetY + cy * dy + (cx % 2 ? dy / 2 : 0);
+
+hexes.push({
+x,
+y,
+rot: 0,
+target: 0
+});
+
+idx++;
+}
+}
+
+
+
+console.log("tile totali:", hexes.length);
+}
+
+/* ---------- RESIZE ---------- */
+function resize(){
+W=c.width=innerWidth;
+H=c.height=innerHeight;
+build();
+}
+
+/* ---------- POLY ---------- */
+function poly(p,fill,stroke,w=2){
+
+ctx.beginPath();
+
+ctx.moveTo(p[0].x,p[0].y);
+
+for(let i=1;i<6;i++){
+ctx.lineTo(p[i].x,p[i].y);
+}
+
+ctx.closePath();
+
+ctx.fillStyle=fill;
+ctx.fill();
+
+if(showBorder){
+
+ctx.strokeStyle=stroke;
+ctx.lineWidth=w;
+ctx.stroke();
+
+}
+}
+
+/* ---------- MARKERS ---------- */
+function drawMarkers(){
+
+const p=hexPts(0,0,S);
+
+ctx.fillStyle="white";
+
+for(let i=0;i<6;i++){
+
+const a=p[i];
+const b=p[(i+1)%6];
+
+ctx.beginPath();
+
+ctx.arc(
+(a.x+b.x)/2,
+(a.y+b.y)/2,
+4.5,
+0,
+Math.PI*2
+);
+
+ctx.fill();
+}
+}
+
+/* ---------- PATTERN ---------- */
+function drawPattern(scale,rot=0){
+
+ctx.save();
+
+ctx.rotate(rot);
+
+ctx.strokeStyle="white";
+ctx.lineWidth=6;
+ctx.lineCap="round";
+ctx.lineJoin="round";
+
+for(const s of strokes){
+
+if(s.length<2) continue;
+
+ctx.beginPath();
+
+for(let i=0;i<s.length;i++){
+
+const x=s[i].x*scale;
+const y=s[i].y*scale;
+
+if(i===0) ctx.moveTo(x,y);
+else ctx.lineTo(x,y);
+
+}
+
+ctx.stroke();
+}
+
+ctx.restore();
+}
+
+/* ---------- TEXTURE ---------- */
+function drawTexture(h){
+
+if(!texture) return;
+
+const p=hexPts(0,0,S,0);
+
+ctx.save();
+
+/* clip esagono */
+ctx.beginPath();
+ctx.moveTo(p[0].x,p[0].y);
+
+for(let i=1;i<6;i++){
+ctx.lineTo(p[i].x,p[i].y);
+}
+
+ctx.closePath();
+ctx.clip();
+
+/* rotazione texture */
+ctx.rotate(h.rot);
+
+/* texture */
+ctx.drawImage(
+texture,
+-S,
+-S,
+S*2,
+S*2
+);
+
+ctx.restore();
+}
+
+/* ---------- DRAW HEX ---------- */
+function drawHex(h,i){
+
+const p=hexPts(h.x,h.y,S,h.rot);
+
+/* base */
+poly(p,"#d60000","black",3);
+
+ctx.save();
+ctx.translate(h.x,h.y);
+
+/* texture SEMPRE */
+drawTexture(h);
+
+/* master */
+if(i===masterIndex){
+
+drawPattern(S,0);
+drawMarkers();
+
+if(highlightedMaster){
+
+ctx.save();
+
+const pp=hexPts(0,0,S,0);
+
+ctx.shadowColor="#00aaff";
+ctx.shadowBlur=20;
+
+ctx.fillStyle="rgba(0,140,255,0.25)";
+ctx.strokeStyle="#00aaff";
+ctx.lineWidth=4;
+
+ctx.beginPath();
+ctx.moveTo(pp[0].x,pp[0].y);
+
+for(let k=1;k<6;k++){
+ctx.lineTo(pp[k].x,pp[k].y);
+}
+
+ctx.closePath();
+
+ctx.fill();
+ctx.stroke();
+
+ctx.restore();
+}
+
+}else{
+
+drawPattern(S,h.rot);
+drawMarkers();
+
+}
+
+ctx.restore();
+}
+
+/* ---------- HIT ---------- */
+function inside(x,y,h){
+
+const p=hexPts(h.x,h.y,S,h.rot);
+
+let ok=false;
+
+for(let i=0,j=5;i<6;j=i++){
+
+if(
+((p[i].y>y)!=(p[j].y>y)) &&
+x<(p[j].x-p[i].x)*(y-p[i].y)/(p[j].y-p[i].y)+p[i].x
+){
+ok=!ok;
+}
+}
+
+return ok;
+}
+
+c.oncontextmenu=e=>e.preventDefault();
+
+/* ---------- INPUT ---------- */
+c.onmousedown=e=>{
+
+const r=c.getBoundingClientRect();
+
+const x=e.clientX-r.left;
+const y=e.clientY-r.top;
+
+const master=hexes[masterIndex];
+
+/* DRAW MASTER */
+if(inside(x,y,master)){
+
+drawing=true;
+
+cur=[];
+
+strokes.push(cur);
+
+cur.push({
+x:(x-master.x)/S,
+y:(y-master.y)/S
+});
+
+return;
+}
+
+/* ROTAZIONE TILE */
+for(let i=0;i<hexes.length;i++){
+
+if(i===masterIndex) continue;
+
+if(inside(x,y,hexes[i])){
+
+if(e.button===0){
+console.log("ruoto a sinistra", i);
+hexes[i].target-=Math.PI/3;
+}
+
+if(e.button===2){
+console.log("ruoto a destra", i);
+hexes[i].target+=Math.PI/3;
+}
+
+break;
+}
+
+
+}
+};
+
+c.onmousemove=e=>{
+
+if(!drawing || !cur) return;
+
+const m=hexes[masterIndex];
+
+const r=c.getBoundingClientRect();
+
+cur.push({
+x:(e.clientX-r.left-m.x)/S,
+y:(e.clientY-r.top-m.y)/S
+});
+};
+
+addEventListener("mouseup",()=>{
+
+drawing=false;
+cur=null;
+
+});
+
+/* ---------- UI ---------- */
+borderBtn.onclick=()=>{
+
+showBorder=!showBorder;
+
+borderBtn.textContent=
+showBorder ? "Bordi ON" : "Border OFF";
+};
+
+masterBtn.onclick=()=>{
+
+highlightedMaster=!highlightedMaster;
+
+masterBtn.textContent=
+highlightedMaster ? "Master ON" : "Master OFF";
+};
+
+
+
+clearBtn.onclick = () => {
+    if(confirm("Cancellare tutto?")){
+        clearAll();
+    }
+};
+
+
+function clearAll() {
+
+    // disegni
+    strokes = [];
+    cur = null;
+    drawing = false;
+
+    // immagine caricata
+    texture = null;
+
+    // reset input file
+    if (typeof fileInput !== "undefined") {
+        fileInput.value = "";
+    }
+
+    // pulizia canvas principale
+    if (typeof ctx !== "undefined" && typeof W !== "undefined" && typeof H !== "undefined") {
+        ctx.clearRect(0, 0, W, H);
+    }
+
+    // pulizia layer paint (se esiste)
+    if (typeof paintCtx !== "undefined" && typeof paintCanvas !== "undefined") {
+        paintCtx.clearRect(0, 0, paintCanvas.width, paintCanvas.height);
+    }
+}
+
+resetBtn.onclick=()=>{
+
+if(confirm("Reset rotazioni?")){
+
+for(const h of hexes){
+
+h.rot=0;
+h.target=0;
+
+}
+}
+};
+saveRotBtn.onclick = () => {
+    console.log("hexes=",hexes);
+    const data = hexes.map(h => ({
+    rot: h.rot
+    }));
+
+    console.log("data=",data);
+
+
+    const blob = new Blob([JSON.stringify(data)], {type:"application/json"});
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "rotazioni_hex.json";
+    a.click();
+
+    URL.revokeObjectURL(url);
+};
+
+
+/* applicazione progressiva */
+function applyNextRotation(){
+
+console.log("[applyNextRotation]", loadStepIndex);
+
+if(!loadedRotations) return;
+
+if(loadStepIndex >= hexes.length) return;
+
+hexes[loadStepIndex].rot = loadedRotations[loadStepIndex].rot;
+hexes[loadStepIndex].target = loadedRotations[loadStepIndex].rot; // IMPORTANTISSIMO
+
+loadStepIndex++;
+
+requestAnimationFrame(applyNextRotation);
+}
+
+/* file picker */
+loadRotBtn.onclick = () => {
+rotInput.value = "";   // importante: permette ricarica stesso file
+rotInput.click();
+};
+
+
+/* file letto */
+rotInput.onchange = e => {
+    const file = e.target.files[0];
+    if(!file) return;
+
+    const reader = new FileReader();
+
+    reader.onload = ev => {
+        try{
+
+        loadedRotations = JSON.parse(ev.target.result);
+        loadStepIndex = 0;
+
+        /* parte subito applicazione */
+        applyNextRotation();
+
+        }catch(err){
+            alert("File non valido");
+        }
+
+    };
+
+    reader.readAsText(file);
+};
+
+/* ---------- SAVE PNG ---------- */
+saveBtn.onclick=()=>{
+
+const size=Math.ceil(S*2);
+
+const off=document.createElement("canvas");
+
+off.width=size;
+off.height=size;
+
+const o=off.getContext("2d");
+
+/* centro */
+o.translate(size/2,size/2);
+
+const p=hexPts(0,0,S);
+
+/* clip esagono */
+o.beginPath();
+o.moveTo(p[0].x,p[0].y);
+
+for(let i=1;i<6;i++){
+o.lineTo(p[i].x,p[i].y);
+}
+
+o.closePath();
+o.clip();
+
+/* fondo */
+o.fillStyle="#d60000";
+
+o.beginPath();
+o.moveTo(p[0].x,p[0].y);
+
+for(let i=1;i<6;i++){
+o.lineTo(p[i].x,p[i].y);
+}
+
+o.closePath();
+
+o.fill();
+
+/* pattern */
+o.strokeStyle="white";
+o.lineWidth=6;
+o.lineCap="round";
+o.lineJoin="round";
+
+for(const s of strokes){
+
+if(s.length<2) continue;
+
+o.beginPath();
+
+for(let i=0;i<s.length;i++){
+
+const x=s[i].x*S;
+const y=s[i].y*S;
+
+if(i===0) o.moveTo(x,y);
+else o.lineTo(x,y);
+}
+
+o.stroke();
+}
+
+
+/* download */
+const url=off.toDataURL("image/png");
+
+const a=document.createElement("a");
+
+a.href=url;
+a.download="master.png";
+
+a.click();
+
+/* texture */
+texture=new Image();
+
+texture.onload=()=>{};
+
+texture.src=url;
+};
+
+/* ---------- LOAD IMAGE ---------- */
+fileInput.onchange=e=>{
+
+const file=e.target.files[0];
+
+if(!file) return;
+
+const reader=new FileReader();
+
+reader.onload=ev=>{
+
+texture=new Image();
+
+texture.onload=()=>{};
+
+texture.src=ev.target.result;
+};
+
+reader.readAsDataURL(file);
+};
+
+loadBtn.onclick = () => {
+    if(confirm("Cancellare tutto?")){
+        clearAll();
+        fileInput.click();
+    }
+};
+
+savePavementBtn.onclick = () => {
+
+    const off = document.createElement("canvas");
+    const octx = off.getContext("2d");
+
+    off.width = W;
+    off.height = H;
+
+    // disegna tutto il canvas corrente dentro l'offscreen
+    octx.drawImage(c, 0, 0);
+
+    const url = off.toDataURL("image/png");
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "pavimento.png";
+    a.click();
+};
+
+
+/* ---------- LOOP ---------- */
+function loop(){
+
+ctx.clearRect(0,0,W,H);
+
+/* animazione rotazioni (smooth) */
+for(const h of hexes){
+
+let diff = h.target - h.rot;
+
+/* porta la differenza nell'intervallo -PI .. PI */
+if(diff > Math.PI) diff -= Math.PI * 2;
+if(diff < -Math.PI) diff += Math.PI * 2;
+
+/* velocità di interpolazione */
+h.rot += diff * 0.15;
+
+}
+
+for(let i=0;i<hexes.length;i++){
+drawHex(hexes[i],i);
+}
+
+requestAnimationFrame(loop);
+}
+/* ---------- START ---------- */
+resize();
+loop();
+
+addEventListener("resize",resize);
+</script>
+
+</body>
+</html>
